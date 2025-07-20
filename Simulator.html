@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>UAE ACC Map with ATC Simulator</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;700&display=swap" rel="stylesheet">
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      height: 100%;
+      width: 100%;
+      overflow: hidden;
+    }
+
+    #map {
+      height: 100vh;
+      width: 100vw;
+      background-color: #374b57;
+    }
+
+    .map-btn {
+      position: absolute;
+      top: 2px;
+      z-index: 1001;
+      padding: 6px 10px;
+      font-size: 12px;
+      background: rgba(255, 255, 255, 0.8);
+      border: 1px solid #888;
+      border-radius: 8px;
+      cursor: pointer;
+    }
+
+    #toggleMapBtn { left: 5px; width: 100px; }
+    #toggleSimulationBtn { left: 106px; width: 110px; }
+
+.aircraft-label {
+  background: #374b57;
+  color: white;
+  padding: 20px 20px;
+  font: bold 10px 'Roboto', sans-serif;
+  border-radius: 4px;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  border: 1px solid white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 30px; /* Adjust height to match or exceed padding total for vertical centering */
+}
+    .coord-label {
+      background: none !important;
+      border: none !important;
+      box-shadow: none !important;
+      padding: 0 !important;
+      color: white;
+      font: 300 9px 'Roboto', sans-serif;
+      text-align: center;
+      opacity: 0.5;
+    }
+
+    .coord-label::before {
+      display: none !important;
+    }
+
+    .star-marker {
+      color: white;
+      font-size: 20px;
+      font-weight: thin;
+      line-height: 1;
+      text-align: center;
+      transform: translate(-50%, -50%);
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <button id="toggleMapBtn" class="map-btn">Toggle Map</button>
+  <button id="toggleSimulationBtn" class="map-btn">Sim: Start</button>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    // Data
+    const rawCoords = [
+      ["262100N", "0560600E"], ["253600N", "0561300E"], ["250000N", "0563500E"],
+      ["240000N", "0553500E"], ["224200N", "0551200E"], ["225611N", "0523488E"],
+      ["240300N", "0514700E"], ["254900N", "0530600E"], ["260430N", "0535730E"],
+      ["253800N", "0552000E"], ["262100N", "0560600E"]
+    ];
+
+    const extraPoints = {
+      "ENANO": ["252360.2N", "0522560.38E"], "ALSEM": ["252705N", "0524336E"], "ASTOG": ["252822N", "0525025E"],
+      "PURLI": ["253644N", "0532436E"], "GODKI": ["254122N", "0534347E"], "KIVUS": ["254522N", "0540032E"],
+      "ITBUL": ["254910N", "0541227E"], "EMOTA": ["255254N", "0542414E"], "TATLA": ["254753N", "0544008E"],
+      "GONVI": ["254239.8N", "0545630.5E"], "GIBIB": ["255507N", "0541712E"], "ALRAR": ["254058.2N", "0550149.4E"],
+      "TOVIV": ["253302N", "0551942E"], "ALSIL": ["252911.1N", "0554639.4E"], "EMOPI": ["252620.0N", "0560900.0E"],
+      "KUSEN": ["251828.0N", "0562340.0E"], "DOH": ["251499N", "0513658E"]
+    };
+
+    const airways = {
+      "Q563": ["DAXIB", "UKUVO", "IMGUX"],
+      "L305": ["ENANO", "ALSEM", "ASTOG", "PURLI", "GODKI", "KIVUS", "ITBUL", "EMOTA"],
+      "R784": ["GIBIB", "EMOTA", "TATLA", "GONVI", "ALRAR", "TOVIV", "ALSIL", "EMOPI", "KUSEN"]
+    };
+
+    const routes = {
+      "DOH-GONVI": ["ENANO", "L305", "EMOTA", "R784", "GONVI"]
+    };
+
+    // Convert coordinates to decimal
+    function convertDMSToDecimal(dmsStr) {
+      const match = dmsStr.match(/^(\d{2,3})(\d{2})(\d{2}(?:\.\d+)?)([NSWE])$/);
+      if (!match) return null;
+      const [, deg, min, sec, dir] = match;
+      let decimal = parseInt(deg) + parseInt(min) / 60 + parseFloat(sec) / 3600;
+      if (dir === "S" || dir === "W") decimal *= -1;
+      return decimal;
+    }
+
+    const latlngs = rawCoords.map(([lat, lon]) => [convertDMSToDecimal(lat), convertDMSToDecimal(lon)]).filter(Boolean);
+    const extraLatLngs = Object.entries(extraPoints).map(([name, [lat, lon]]) => ({
+      name, lat: convertDMSToDecimal(lat), lon: convertDMSToDecimal(lon)
+    })).filter(pt => pt.lat !== null && pt.lon !== null);
+
+    // Map setup
+    const map = L.map("map", {
+      zoomControl: false,
+      attributionControl: false,
+      scrollWheelZoom: true,
+      wheelPxPerZoomLevel: 200
+    }).setView(latlngs[0], 7);
+
+    const baseMapLayer = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}", {
+      attribution: "Tiles © Esri",
+      maxZoom: 19,
+      opacity: 0.7
+    });
+
+    // Map layers and state
+    let mapLayerVisible = false;
+    let triangleLayers = [];
+    let extraLabelMarkers = [];
+    let isSimulationRunning = false;
+    let aircraftMarker = null, aircraftLabel = null, aircraftLine = null;
+    let animationFrameId = null;
+
+    // Draw FIR boundary
+    const polyline = L.polyline(latlngs, { color: "yellow", weight: 0.8, dashArray: "3 3" }).addTo(map);
+    map.fitBounds(polyline.getBounds());
+
+    // Draw waypoints as triangles
+    function drawEquilateralTriangle(center, size) {
+      const [lat, lon] = center;
+      const height = size, halfBase = size / Math.sqrt(3);
+      return L.polygon([
+        [lat + height / 2, lon], [lat - height / 2, lon - halfBase], [lat - height / 2, lon + halfBase]
+      ], { color: "grey", weight: 1.5, fill: false }).addTo(map);
+    }
+
+    function renderTriangles() {
+      triangleLayers.forEach(layer => map.removeLayer(layer));
+      triangleLayers = [];
+      const zoom = map.getZoom(), baseSize = 0.05, scale = Math.pow(2, 7 - zoom), size = baseSize * scale;
+      extraLatLngs.forEach(pt => triangleLayers.push(drawEquilateralTriangle([pt.lat, pt.lon], size)));
+    }
+
+    // Draw airways
+    function drawAirways() {
+      Object.entries(airways).forEach(([_, points]) => {
+        const latlngs = points.map(name => extraPoints[name]).filter(Boolean).map(pt => [convertDMSToDecimal(pt[0]), convertDMSToDecimal(pt[1])]);
+        if (latlngs.length >= 2) {
+          L.polyline(latlngs, { color: "#737373", weight: 1.3, opacity: 0.5 }).addTo(map);
+        }
+      });
+    }
+
+    // Draw waypoint labels
+    extraLatLngs.forEach(pt => {
+      const label = L.tooltip({
+        permanent: true,
+        direction: "top",
+        offset: [7, -1],
+        className: "coord-label"
+      }).setLatLng([pt.lat, pt.lon]).setContent(pt.name).addTo(map);
+      extraLabelMarkers.push(label);
+    });
+
+    // ATC Simulator: Moving target along DOH-GONVI route at 1 pixel per second
+    function expandRouteForSimulation(routeSeq, airwaysDict) {
+      const expanded = [];
+      for (let i = 0; i < routeSeq.length; i++) {
+        const item = routeSeq[i];
+        if (airwaysDict[item]) {
+          const entry = routeSeq[i - 1], exit = routeSeq[i + 1], airway = airwaysDict[item];
+          const s = airway.indexOf(entry), e = airway.indexOf(exit);
+          if (s !== -1 && e !== -1) {
+            let segment = airway.slice(Math.min(s, e), Math.max(s, e) + 1);
+            if (s > e) segment.reverse();
+            if (expanded.length && expanded[expanded.length - 1] === segment[0]) segment.shift();
+            expanded.push(...segment);
+          }
+        } else if (!expanded.includes(item)) {
+          expanded.push(item);
+        }
+      }
+      return expanded;
+    }
+
+    function getRoutePath(routeKey) {
+      const routeSteps = routes[routeKey];
+      if (!routeSteps) return [];
+      const waypoints = expandRouteForSimulation(routeSteps, airways);
+      return waypoints.map(name => {
+        const pt = extraPoints[name];
+        return pt ? [convertDMSToDecimal(pt[0]), convertDMSToDecimal(pt[1])] : null;
+      }).filter(Boolean);
+    }
+
+    function interpolatePosition(start, end, t) {
+      return [
+        start[0] + (end[0] - start[0]) * t,
+        start[1] + (end[1] - start[1]) * t
+      ];
+    }
+
+    function updateAircraftLineAndLabel(aircraft) {
+      if (aircraftMarker && aircraftLabel && aircraftLine) {
+        const starLatLng = aircraftMarker.getLatLng();
+        const labelPoint = map.latLngToLayerPoint(starLatLng).add(aircraft.labelOffset);
+        const labelLatLng = map.layerPointToLatLng(labelPoint);
+        aircraftLabel.setLatLng(labelLatLng);
+        aircraftLine.setLatLngs([starLatLng, labelLatLng]);
+      }
+    }
+
+
+    function startSimulation() {
+      if (isSimulationRunning) return;
+      isSimulationRunning = true;
+      document.getElementById("toggleSimulationBtn").textContent = "Sim: Stop";
+
+      const routePath = getRoutePath("DOH-GONVI");
+      if (routePath.length < 2) {
+        alert("Invalid route path!");
+        return;
+      }
+
+      const aircraft = {
+        callsign: "UAE123",
+        altitude: 21000,
+        speed: 320,
+        position: [...routePath[0]],
+        segmentIndex: 0,
+        t: 0,
+        lastFrameTime: performance.now(),
+        labelOffset: [0, -100] // Initial offset: 10px right
+      };
+
+      if (aircraftMarker) map.removeLayer(aircraftMarker);
+      if (aircraftLabel) map.removeLayer(aircraftLabel);
+      if (aircraftLine) map.removeLayer(aircraftLine);
+
+      aircraftMarker = L.marker(aircraft.position, {
+        icon: L.divIcon({
+          className: "star-marker",
+          html: "*",
+          iconSize: [16, 16],
+          iconAnchor: [7, 5]
+        })
+      }).addTo(map);
+
+      const initialLabelLatLng = map.layerPointToLatLng(
+        map.latLngToLayerPoint(aircraft.position).add(aircraft.labelOffset)
+      );
+      aircraftLabel = L.marker(initialLabelLatLng, {
+        icon: L.divIcon({
+          className: "aircraft-label",
+          html: `${aircraft.callsign} FL${Math.round(aircraft.altitude / 100)} ${aircraft.speed}kt`
+        }),
+        draggable: true
+      }).addTo(map);
+
+      aircraftLine = L.polyline([aircraft.position, initialLabelLatLng], {
+        color: "white",
+        weight: 1,
+        opacity: 0.8
+      }).addTo(map);
+
+      aircraftLabel.on("drag", () => {
+        const starLatLng = aircraftMarker.getLatLng();
+        const labelLatLng = aircraftLabel.getLatLng();
+        const starPoint = map.latLngToLayerPoint(starLatLng);
+        const labelPoint = map.latLngToLayerPoint(labelLatLng);
+        aircraft.labelOffset = [labelPoint.x - starPoint.x, labelPoint.y - starPoint.y];
+        updateAircraftLineAndLabel(aircraft);
+      });
+
+      const pixelsPerSecond = 1; // Target speed: 1 pixel per second
+      let segmentPixelLengths = [];
+
+      function updateSegmentPixelLengths() {
+        segmentPixelLengths = [];
+        for (let i = 0; i < routePath.length - 1; i++) {
+          const startPixel = map.latLngToContainerPoint(routePath[i]);
+          const endPixel = map.latLngToContainerPoint(routePath[i + 1]);
+          const pixelDistance = Math.sqrt(
+            Math.pow(endPixel.x - startPixel.x, 2) + Math.pow(endPixel.y - startPixel.y, 2)
+          );
+          segmentPixelLengths.push(pixelDistance);
+        }
+      }
+
+      // Initial calculation
+      updateSegmentPixelLengths();
+
+      function animate(currentTime) {
+        if (!isSimulationRunning) return;
+        if (aircraft.segmentIndex >= routePath.length - 1) {
+          stopSimulation();
+          return;
+        }
+
+        const deltaTime = (currentTime - aircraft.lastFrameTime) / 1000; // Seconds since last frame
+        aircraft.lastFrameTime = currentTime;
+
+        // Recalculate pixel lengths each frame to handle zoom changes
+        updateSegmentPixelLengths();
+
+        const segmentPixelLength = segmentPixelLengths[aircraft.segmentIndex];
+        aircraft.t += (pixelsPerSecond * deltaTime) / segmentPixelLength;
+
+        if (aircraft.t >= 1) {
+          aircraft.t = 0;
+          aircraft.segmentIndex++;
+          if (aircraft.segmentIndex >= routePath.length - 1) {
+            stopSimulation();
+            return;
+          }
+        }
+
+        const start = routePath[aircraft.segmentIndex];
+        const end = routePath[aircraft.segmentIndex + 1];
+        aircraft.position = interpolatePosition(start, end, aircraft.t);
+        aircraftMarker.setLatLng(aircraft.position);
+        updateAircraftLineAndLabel(aircraft);
+
+        animationFrameId = requestAnimationFrame(animate);
+      }
+
+      requestAnimationFrame(animate);
+    }
+
+    function stopSimulation() {
+      isSimulationRunning = false;
+      document.getElementById("toggleSimulationBtn").textContent = "Sim: Start";
+      if (animationFrameId) cancelAnimationFrame(animationFrameId);
+      if (aircraftMarker) map.removeLayer(aircraftMarker);
+      if (aircraftLabel) map.removeLayer(aircraftLabel);
+      if (aircraftLine) map.removeLayer(aircraftLine);
+      aircraftMarker = null;
+      aircraftLabel = null;
+      aircraftLine = null;
+    }
+
+    // Event handlers
+    document.getElementById("toggleMapBtn").addEventListener("click", () => {
+      mapLayerVisible = !mapLayerVisible;
+      mapLayerVisible ? baseMapLayer.addTo(map) : map.removeLayer(baseMapLayer);
+    });
+
+    document.getElementById("toggleSimulationBtn").addEventListener("click", () => {
+      if (isSimulationRunning) stopSimulation();
+      else startSimulation();
+    });
+
+    // Initialize map
+    window.onload = () => {
+      renderTriangles();
+      drawAirways();
+      map.on("zoomend", renderTriangles);
+    };
+  </script>
+</body>
+</html>
